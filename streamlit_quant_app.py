@@ -1,7 +1,6 @@
 """
 量化交易模型 - 浏览器交互版（Streamlit）
 运行方式：streamlit run streamlit_quant_app.py
-然后在浏览器打开显示的地址（通常是 http://localhost:8501）
 """
 
 import streamlit as st
@@ -14,9 +13,8 @@ warnings.filterwarnings("ignore")
 
 st.set_page_config(page_title="加密货币量化交易模型", layout="wide")
 st.title("加密货币量化交易模型（浏览器版）")
-st.markdown("基于趋势 + RSI + MACD + 成交量的多指标策略，可在浏览器中交互使用。")
+st.markdown("基于趋势 + RSI + MACD + 成交量的多指标策略")
 
-# ==================== 侧边栏参数 ====================
 st.sidebar.header("策略参数")
 symbol = st.sidebar.selectbox("交易对", ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD"])
 period = st.sidebar.selectbox("数据周期", ["1y", "2y", "3y", "5y"], index=2)
@@ -28,9 +26,7 @@ stop_loss_pct = st.sidebar.slider("止损比例 (%)", 0.5, 3.0, 1.0) / 100
 position_pct = st.sidebar.slider("仓位比例", 0.3, 1.0, 0.8)
 
 run_button = st.sidebar.button("开始回测", type="primary")
-optimize_button = st.sidebar.button("优化参数（网格搜索）")
 
-# ==================== 策略定义 ====================
 def RSI(series, period=14):
     delta = pd.Series(series).diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -74,14 +70,11 @@ class BrowserQuantStrategy(Strategy):
             sl = price * (1 - self.stop_loss_pct)
             self.buy(size=self.position_pct, sl=sl)
         elif self.position:
-            if (self.rsi[-1] > self.rsi_exit or 
-                price < self.trend_sma[-1] or 
-                self.macd[-1] < self.macd_signal[-1]):
+            if (self.rsi[-1] > self.rsi_exit or price < self.trend_sma[-1] or self.macd[-1] < self.macd_signal[-1]):
                 self.position.close()
 
-# ==================== 主逻辑 ====================
 if run_button:
-    with st.spinner("正在下载数据并回测，请稍候..."):
+    with st.spinner("正在下载数据并回测..."):
         try:
             data = yf.download(symbol, period=period, interval="1d", progress=False)
             data = data.dropna()
@@ -89,7 +82,6 @@ if run_button:
                 data.columns = data.columns.droplevel(1)
             data.columns = [c.capitalize() for c in data.columns]
 
-            # 动态设置策略参数
             BrowserQuantStrategy.trend_period = trend_period
             BrowserQuantStrategy.rsi_oversold = rsi_oversold
             BrowserQuantStrategy.stop_loss_pct = stop_loss_pct
@@ -99,70 +91,20 @@ if run_button:
             stats = bt.run()
 
             st.success("回测完成！")
-
-            # 关键指标展示
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("总收益", f"{stats['Return [%]']:.2f}%")
             col2.metric("胜率", f"{stats['Win Rate [%]']:.1f}%")
             col3.metric("最大回撤", f"{stats['Max. Drawdown [%]']:.2f}%")
             col4.metric("交易次数", f"{stats['# Trades']}")
 
-            st.subheader("详细回测结果")
+            st.subheader("详细结果")
             st.text(str(stats))
-
-            # 权益曲线
             st.subheader("权益曲线")
-            equity = stats._equity_curve["Equity"]
-            st.line_chart(equity)
-
+            st.line_chart(stats._equity_curve["Equity"])
         except Exception as e:
-            st.error(f"运行出错：{e}")
+            st.error(f"运行出错：{str(e)}")
 else:
-    st.info("请在左侧调整参数后，点击「开始回测」按钮。")
-
-# ==================== 参数优化 ====================
-if optimize_button:
-    with st.spinner("正在进行参数网格搜索（可能需要1-2分钟）..."):
-        try:
-            data = yf.download(symbol, period=period, interval="1d", progress=False)
-            data = data.dropna()
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = data.columns.droplevel(1)
-            data.columns = [c.capitalize() for c in data.columns]
-
-            bt = FractionalBacktest(data, BrowserQuantStrategy, cash=cash, commission=0.001, exclusive_orders=True)
-            
-            # 网格搜索关键参数
-            stats, heatmap = bt.optimize(
-                trend_period=range(30, 81, 10),
-                rsi_oversold=range(35, 56, 5),
-                stop_loss_pct=[0.008, 0.01, 0.015, 0.02],
-                maximize='Win Rate [%]',   # 以胜率为优化目标（也可改为 'Return [%]' 或 'Sharpe Ratio'）
-                constraint=lambda p: p.rsi_oversold < 60,
-                return_heatmap=True
-            )
-
-            st.success("参数优化完成！")
-            st.subheader("最优参数组合（以胜率为目标）")
-            st.write(f"**趋势均线周期**: {stats._strategy.trend_period}")
-            st.write(f"**RSI超卖阈值**: {stats._strategy.rsi_oversold}")
-            st.write(f"**止损比例**: {stats._strategy.stop_loss_pct*100:.1f}%")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("最优胜率", f"{stats['Win Rate [%]']:.1f}%")
-            col2.metric("对应收益", f"{stats['Return [%]']:.2f}%")
-            col3.metric("最大回撤", f"{stats['Max. Drawdown [%]']:.2f}%")
-            col4.metric("交易次数", f"{stats['# Trades']}")
-
-            st.subheader("最优参数下的详细结果")
-            st.text(str(stats))
-
-            if heatmap is not None:
-                st.subheader("参数热力图（胜率）")
-                st.dataframe(heatmap.round(2))
-
-        except Exception as e:
-            st.error(f"优化过程出错：{e}")
+    st.info("请在左侧调整参数后点击「开始回测」")
 
 st.markdown("---")
-st.caption("本工具仅供学习与研究使用。历史回测不代表未来表现，请注意风险。")
+st.caption("仅供学习研究使用，历史回测不代表未来表现。")
