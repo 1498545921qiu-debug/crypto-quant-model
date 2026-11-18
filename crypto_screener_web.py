@@ -1,23 +1,51 @@
 """
-加密货币筛选网页 - Streamlit版
-功能：多币种筛选、买卖信号+止盈止损、波动事件提示
-部署后直接用浏览器打开即可使用
+加密货币筛选网页 - 扩展版
+支持筛选市值前100加密货币
 """
 
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
+import requests
 
 st.set_page_config(page_title="加密货币量化筛选", layout="wide")
 st.title("加密货币量化筛选网页")
 st.caption("多币种筛选 · 买卖信号 · 止盈止损 · 波动事件提示")
 
-# 侧边栏设置
+@st.cache_data(ttl=3600)
+def get_top_coins(limit=100):
+    """从 CoinGecko 获取市值前 N 的币种"""
+    try:
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": limit,
+            "page": 1,
+            "sparkline": False
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        symbols = []
+        for coin in data:
+            sym = coin["symbol"].upper() + "-USD"
+            symbols.append(sym)
+        return symbols
+    except Exception as e:
+        st.warning(f"获取币种列表失败，使用默认列表：{e}")
+        return ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "ADA-USD", "DOGE-USD", "AVAX-USD"]
+
+# 侧边栏
 st.sidebar.header("筛选设置")
-default_coins = ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "ADA-USD", "DOGE-USD", "AVAX-USD", "LINK-USD", "DOT-USD"]
-selected = st.sidebar.multiselect("选择要筛选的币种", default_coins, default=default_coins[:8])
-period = st.sidebar.selectbox("数据周期", ["30d", "60d", "90d", "180d"], index=1)
+top_n = st.sidebar.slider("筛选市值前 N 名", 10, 100, 50)
+all_coins = get_top_coins(top_n)
+selected = st.sidebar.multiselect(
+    "选择要筛选的币种（可多选或全选）",
+    all_coins,
+    default=all_coins[:20]
+)
+period = st.sidebar.selectbox("数据周期", ["30d", "60d", "90d"], index=1)
 run = st.sidebar.button("开始筛选", type="primary")
 
 def get_data(symbol, period):
@@ -34,7 +62,7 @@ def analyze(df, symbol):
         return None
     close = df["Close"]
     volume = df["Volume"]
-    price = close.iloc[-1]
+    price = float(close.iloc[-1])
     change = (close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100
 
     sma20 = close.rolling(20).mean().iloc[-1]
@@ -47,7 +75,6 @@ def analyze(df, symbol):
     vol_ratio = volume.iloc[-1] / vol_ma if vol_ma > 0 else 0
     volatility = close.pct_change().rolling(5).std().iloc[-1] * 100
 
-    # 信号
     if price > sma20 and rsi < 50:
         signal = "买入"
         sl = round(price * 0.988, 4)
@@ -59,7 +86,6 @@ def analyze(df, symbol):
         signal = "观望"
         sl = tp = "-"
 
-    # 波动事件
     events = []
     if abs(change) >= 4:
         events.append(f"价格异动{change:+.1f}%")
@@ -79,23 +105,24 @@ def analyze(df, symbol):
         "波动提示": " | ".join(events) if events else "-"
     }
 
-if run or "results" not in st.session_state:
+if run:
     if not selected:
         st.warning("请至少选择一个币种")
     else:
-        with st.spinner("正在筛选中..."):
-            results = []
-            for sym in selected:
-                df = get_data(sym, period)
-                res = analyze(df, sym)
-                if res:
-                    results.append(res)
-            st.session_state.results = pd.DataFrame(results)
+        progress = st.progress(0)
+        results = []
+        for i, sym in enumerate(selected):
+            df = get_data(sym, period)
+            res = analyze(df, sym)
+            if res:
+                results.append(res)
+            progress.progress((i + 1) / len(selected))
+        progress.empty()
+        st.session_state.results = pd.DataFrame(results)
 
 if "results" in st.session_state and not st.session_state.results.empty:
     df = st.session_state.results
 
-    # 高亮买入信号
     def color_signal(val):
         if val == "买入":
             return "background-color: #d4edda; color: #155724"
@@ -103,22 +130,19 @@ if "results" in st.session_state and not st.session_state.results.empty:
             return "background-color: #f8d7da; color: #721c24"
         return ""
 
-    st.subheader(f"筛选结果（{datetime.now().strftime('%Y-%m-%d %H:%M')}）")
+    st.subheader(f"筛选结果（{datetime.now().strftime('%Y-%m-%d %H:%M')}）共 {len(df)} 个币")
     styled = df.style.map(color_signal, subset=["信号"])
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    # 波动事件单独展示
     vol_df = df[df["波动提示"] != "-"]
     if not vol_df.empty:
         st.subheader("波动事件提示")
         st.dataframe(vol_df[["币种", "最新价", "涨跌%", "波动提示"]], use_container_width=True, hide_index=True)
 
-    # 下载
     csv = df.to_csv(index=False).encode("utf-8-sig")
     st.download_button("下载筛选结果 CSV", csv, "crypto_screen.csv", "text/csv")
-
 else:
-    st.info("请在左侧选择币种后点击「开始筛选」")
+    st.info("请在左侧选择币种数量和具体币种后，点击「开始筛选」")
 
 st.markdown("---")
-st.caption("仅供学习研究使用，不构成投资建议。历史数据不代表未来表现。")
+st.caption("数据来源：CoinGecko + Yahoo Finance。仅供学习研究，不构成投资建议。")
