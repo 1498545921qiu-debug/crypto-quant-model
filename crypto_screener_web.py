@@ -6,6 +6,7 @@
 - 流动性过滤
 - 只显示买入信号选项
 - 单币种历史回测
+- 新增：市场阶段判断（牛市/熊市/震荡市）
 """
 
 import streamlit as st
@@ -17,7 +18,7 @@ import requests
 
 st.set_page_config(page_title="加密货币量化筛选与回测", layout="wide")
 st.title("加密货币量化筛选与回测")
-st.caption("优化信号 · 动态止盈止损 · 流动性过滤 · 历史回测")
+st.caption("优化信号 · 动态止盈止损 · 流动性过滤 · 历史回测 · 市场阶段")
 
 @st.cache_data(ttl=3600)
 def get_top_coins(limit=100):
@@ -65,6 +66,10 @@ def analyze_coin(df, symbol):
     rsi_recover = 35 < rsi < 60 and rsi > rsi_prev
     volume_ok = vol_ratio > 1.2
 
+    # 熊市时提高买入门槛
+    if phase == "熊市":
+        rsi_recover = 30 < rsi < 45 and rsi > rsi_prev
+
     if trend_up and rsi_recover and volume_ok:
         signal = "买入"
         sl_pct = max(1.0, min(3.0, vol_pct * 0.8))
@@ -97,6 +102,31 @@ def analyze_coin(df, symbol):
         "波动提示": " | ".join(events) if events else "-"
     }
 
+# ==========市场阶段判断==========
+@st.cache_data(ttl=1800)
+def get_market_phase():
+    try:
+        btc = yf.download("BTC-USD", period="120d", interval="1d", progress=False)
+        if isinstance(btc.columns, pd.MultiIndex):
+            btc.columns = btc.columns.droplevel(1)
+        close = btc["Close"].dropna()
+        sma50 = close.rolling(50).mean().iloc[-1]
+        sma50_prev = close.rolling(50).mean().iloc[-5]
+        price = close.iloc[-1]
+        if price > sma50 and sma50 > sma50_prev:
+            return "牛市", "BTC 处于上升趋势，可正常寻找买入机会"
+        elif price < sma50 and sma50 < sma50_prev:
+            return "熊市", "BTC 处于下降趋势，建议减少买入或仅短线操作"
+        else:
+            return "震荡市", "趋势不明，建议降低仓位、谨慎操作"
+    except:
+        return "未知", "无法获取市场数据"
+
+phase, phase_desc = get_market_phase()
+phase_color = {"牛市": "green", "熊市": "red", "震荡市": "orange"}.get(phase, "gray")
+st.markdown(f"**当前市场阶段：<span style='color:{phase_color};font-size:1.2em'>{phase}</span>**  \n{phase_desc}", unsafe_allow_html=True)
+st.markdown("---")
+
 # ==========侧边栏==========
 st.sidebar.header("筛选设置")
 top_n = st.sidebar.slider("市值前 N 名", 20, 100, 50)
@@ -122,10 +152,14 @@ if run and selected:
             pass
         progress.progress((i+1)/len(selected))
     progress.empty()
-    df_res = pd.DataFrame(results)
-    if only_buy:
-        df_res = df_res[df_res["信号"] == "买入"]
-    st.session_state.results = df_res
+    if results:
+        df_res = pd.DataFrame(results)
+        if only_buy and "信号" in df_res.columns:
+            df_res = df_res[df_res["信号"] == "买入"]
+        st.session_state.results = df_res
+    else:
+        st.session_state.results = pd.DataFrame()
+        st.warning("没有找到符合条件的币种（可能被流动性过滤或无买入信号）")
 
 # ==========显示结果==========
 if "results" in st.session_state and not st.session_state.results.empty:
@@ -137,7 +171,6 @@ if "results" in st.session_state and not st.session_state.results.empty:
     st.subheader(f"筛选结果（{len(df)} 个币）")
     st.dataframe(df.style.map(color, subset=["信号"]), use_container_width=True, hide_index=True)
 
-    # ==========单币种回测==========
     st.subheader("单币种历史回测")
     coin_list = df["币种"].tolist()
     if coin_list:
