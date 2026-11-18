@@ -104,7 +104,7 @@ if "results" in st.session_state and not st.session_state.results.empty:
         return ""
 
     st.subheader(f"筛选结果（{datetime.now().strftime('%Y-%m-%d %H:%M')}）")
-    styled = df.style.applymap(color_signal, subset=["信号"])
+    styled = df.style.map(color_signal, subset=["信号"])
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
     # 波动事件单独展示
