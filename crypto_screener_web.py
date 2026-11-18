@@ -1,12 +1,10 @@
 """
-加密货币量化筛选 + 回测网页（完善版）
-改进：
-- 优化买卖信号逻辑（趋势+RSI回升+量能确认）
-- 动态止盈止损（基于波动率）
-- 流动性过滤
-- 只显示买入信号选项
-- 单币种历史回测
-- 新增：市场阶段判断（牛市/熊市/震荡市）
+加密货币量化筛选 + 回测网页（完整版）
+新增：
+- 板块/叙事标签（AI、Meme、DeFi等）
+- 做多/做空方向
+- 市场阶段判断
+- 动态止盈止损、流动性过滤、历史回测
 """
 
 import streamlit as st
@@ -18,27 +16,51 @@ import requests
 
 st.set_page_config(page_title="加密货币量化筛选与回测", layout="wide")
 st.title("加密货币量化筛选与回测")
-st.caption("优化信号 · 动态止盈止损 · 流动性过滤 · 历史回测 · 市场阶段")
+st.caption("板块叙事 · 做多做空 · 市场阶段 · 动态止盈止损 · 历史回测")
 
 @st.cache_data(ttl=3600)
-def get_top_coins(limit=100):
+def get_top_coins_with_category(limit=100):
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {"vs_currency": "usd", "order": "market_cap_desc",
                   "per_page": limit, "page": 1, "sparkline": False}
-        data = requests.get(url, params=params, timeout=10).json()
-        return [c["symbol"].upper() + "-USD" for c in data]
-    except:
-        return ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "ADA-USD"]
+        data = requests.get(url, params=params, timeout=15).json()
+        coins = []
+        for c in data:
+            symbol = c["symbol"].upper() + "-USD"
+            cats = c.get("categories") or []
+            narrative = "其他"
+            cat_str = " ".join(cats).lower() if cats else ""
+            name = c.get("name", "").lower()
+            if any(k in cat_str or k in name for k in ["artificial-intelligence", "ai", "machine-learning"]):
+                narrative = "AI"
+            elif any(k in cat_str or k in name for k in ["meme", "dog", "frog", "pepe"]):
+                narrative = "Meme"
+            elif any(k in cat_str for k in ["decentralized-finance", "defi"]):
+                narrative = "DeFi"
+            elif any(k in cat_str for k in ["layer-1", "smart-contract-platform"]):
+                narrative = "Layer1"
+            elif any(k in cat_str for k in ["layer-2", "scaling"]):
+                narrative = "Layer2"
+            elif any(k in cat_str for k in ["gaming", "metaverse", "nft"]):
+                narrative = "Gaming/NFT"
+            elif any(k in cat_str for k in ["real-world-assets", "rwa"]):
+                narrative = "RWA"
+            coins.append({"symbol": symbol, "narrative": narrative, "name": c.get("name", symbol)})
+        return coins
+    except Exception as e:
+        st.warning(f"获取币种失败：{e}")
+        return [{"symbol": s, "narrative": "其他", "name": s} for s in 
+                ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD"]]
 
 def calc_rsi(series, period=14):
     delta = series.diff()
     gain = delta.where(delta > 0, 0).rolling(period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-    rs = gain / loss
+    rs = gain / loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
-def analyze_coin(df, symbol):
+def analyze_coin(df, symbol, phase="震荡市"):
     if df is None or len(df) < 60:
         return None
     close = df["Close"]
@@ -49,37 +71,49 @@ def analyze_coin(df, symbol):
 
     sma20 = close.rolling(20).mean().iloc[-1]
     sma50 = close.rolling(50).mean().iloc[-1]
-    rsi = calc_rsi(close).iloc[-1]
-    rsi_prev = calc_rsi(close).iloc[-2]
+    rsi_series = calc_rsi(close)
+    rsi = rsi_series.iloc[-1]
+    rsi_prev = rsi_series.iloc[-2]
 
     atr = (high - low).rolling(14).mean().iloc[-1]
-    vol_pct = atr / price * 100
+    vol_pct = atr / price * 100 if price > 0 else 0
 
     vol_ma = volume.rolling(20).mean().iloc[-1]
     vol_ratio = volume.iloc[-1] / vol_ma if vol_ma > 0 else 0
     avg_dollar_vol = (volume * close).rolling(20).mean().iloc[-1]
 
-    if avg_dollar_vol < 1_000_000:
+    if avg_dollar_vol < 500_000:
         return None
 
-    trend_up = price > sma20 and sma20 > sma50
-    rsi_recover = 35 < rsi < 60 and rsi > rsi_prev
-    volume_ok = vol_ratio > 1.2
+    trend_up = price > sma20 > sma50
+    trend_down = price < sma20 < sma50
+    rsi_recover = 35 < rsi < 65 and rsi > rsi_prev
+    rsi_weak = rsi < 40 and rsi < rsi_prev
+    volume_ok = vol_ratio > 1.1
 
-    # 熊市时提高买入门槛
     if phase == "熊市":
-        rsi_recover = 30 < rsi < 45 and rsi > rsi_prev
+        rsi_recover = 30 < rsi < 50 and rsi > rsi_prev
 
     if trend_up and rsi_recover and volume_ok:
+        direction = "做多"
         signal = "买入"
-        sl_pct = max(1.0, min(3.0, vol_pct * 0.8))
-        tp_pct = max(1.5, min(5.0, vol_pct * 1.5))
+        sl_pct = max(1.2, min(3.5, vol_pct * 0.9))
+        tp_pct = max(2.0, min(6.0, vol_pct * 1.6))
         sl = round(price * (1 - sl_pct/100), 4)
         tp = round(price * (1 + tp_pct/100), 4)
-    elif rsi > 75 or price < sma20 * 0.95:
+    elif trend_down and rsi_weak and volume_ok:
+        direction = "做空"
+        signal = "卖出/做空"
+        sl_pct = max(1.2, min(3.5, vol_pct * 0.9))
+        tp_pct = max(2.0, min(6.0, vol_pct * 1.6))
+        sl = round(price * (1 + sl_pct/100), 4)
+        tp = round(price * (1 - tp_pct/100), 4)
+    elif rsi > 75 or (trend_down and price < sma20 * 0.96):
+        direction = "做空"
         signal = "卖出"
         sl = tp = "-"
     else:
+        direction = "观望"
         signal = "观望"
         sl = tp = "-"
 
@@ -94,6 +128,7 @@ def analyze_coin(df, symbol):
         "币种": symbol.replace("-USD", ""),
         "最新价": round(price, 4),
         "涨跌%": round(change, 2),
+        "方向": direction,
         "信号": signal,
         "建议止损": sl,
         "建议止盈": tp,
@@ -102,7 +137,7 @@ def analyze_coin(df, symbol):
         "波动提示": " | ".join(events) if events else "-"
     }
 
-# ==========市场阶段判断==========
+# ==========市场阶段==========
 @st.cache_data(ttl=1800)
 def get_market_phase():
     try:
@@ -112,97 +147,83 @@ def get_market_phase():
         close = btc["Close"].dropna()
         sma50 = close.rolling(50).mean().iloc[-1]
         sma50_prev = close.rolling(50).mean().iloc[-5]
-        price = close.iloc[-1]
+        price = float(close.iloc[-1])
         if price > sma50 and sma50 > sma50_prev:
-            return "牛市", "BTC 处于上升趋势，可正常寻找买入机会"
+            return "牛市", "BTC上升趋势，可积极寻找做多机会"
         elif price < sma50 and sma50 < sma50_prev:
-            return "熊市", "BTC 处于下降趋势，建议减少买入或仅短线操作"
+            return "熊市", "BTC下降趋势，谨慎做多，可关注做空"
         else:
-            return "震荡市", "趋势不明，建议降低仓位、谨慎操作"
+            return "震荡市", "趋势不明，建议轻仓或观望"
     except:
-        return "未知", "无法获取市场数据"
+        return "未知", "无法获取数据"
 
 phase, phase_desc = get_market_phase()
-phase_color = {"牛市": "green", "熊市": "red", "震荡市": "orange"}.get(phase, "gray")
-st.markdown(f"**当前市场阶段：<span style='color:{phase_color};font-size:1.2em'>{phase}</span>**  \n{phase_desc}", unsafe_allow_html=True)
+color_map = {"牛市": "green", "熊市": "red", "震荡市": "orange"}
+st.markdown(f"**当前市场阶段：<span style='color:{color_map.get(phase,'gray')};font-size:1.3em'>{phase}</span>**  \n{phase_desc}", unsafe_allow_html=True)
 st.markdown("---")
 
 # ==========侧边栏==========
 st.sidebar.header("筛选设置")
-top_n = st.sidebar.slider("市值前 N 名", 20, 100, 50)
-only_buy = st.sidebar.checkbox("只显示买入信号", value=False)
+top_n = st.sidebar.slider("市值前 N 名", 20, 100, 40)
+coin_data = get_top_coins_with_category(top_n)
+narratives = sorted(set(c["narrative"] for c in coin_data))
+selected_narr = st.sidebar.multiselect("板块/叙事筛选", narratives, default=narratives)
+only_direction = st.sidebar.selectbox("方向筛选", ["全部", "只看做多", "只看做空"])
 period = st.sidebar.selectbox("数据周期", ["60d", "90d", "180d"], index=0)
-coins = get_top_coins(top_n)
-selected = st.sidebar.multiselect("选择币种", coins, default=coins[:15])
+
+filtered_coins = [c for c in coin_data if c["narrative"] in selected_narr]
+selected_symbols = st.sidebar.multiselect(
+    "选择币种",
+    [c["symbol"] for c in filtered_coins],
+    default=[c["symbol"] for c in filtered_coins[:12]]
+)
 run = st.sidebar.button("开始筛选", type="primary")
 
 # ==========筛选==========
-if run and selected:
+if run and selected_symbols:
     progress = st.progress(0)
     results = []
-    for i, sym in enumerate(selected):
+    narr_map = {c["symbol"]: c["narrative"] for c in coin_data}
+    for i, sym in enumerate(selected_symbols):
         try:
             df = yf.download(sym, period=period, interval="1d", progress=False)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.droplevel(1)
-            res = analyze_coin(df.dropna(), sym)
+            res = analyze_coin(df.dropna(), sym, phase)
             if res:
+                res["板块"] = narr_map.get(sym, "其他")
                 results.append(res)
         except:
             pass
-        progress.progress((i+1)/len(selected))
+        progress.progress((i + 1) / len(selected_symbols))
     progress.empty()
+
     if results:
         df_res = pd.DataFrame(results)
-        if only_buy and "信号" in df_res.columns:
-            df_res = df_res[df_res["信号"] == "买入"]
+        if only_direction == "只看做多":
+            df_res = df_res[df_res["方向"] == "做多"]
+        elif only_direction == "只看做空":
+            df_res = df_res[df_res["方向"] == "做空"]
         st.session_state.results = df_res
     else:
         st.session_state.results = pd.DataFrame()
-        st.warning("没有找到符合条件的币种（可能被流动性过滤或无买入信号）")
+        st.warning("没有符合条件的结果")
 
-# ==========显示结果==========
+# ==========显示==========
 if "results" in st.session_state and not st.session_state.results.empty:
     df = st.session_state.results
-    def color(val):
-        if val == "买入": return "background-color:#d4edda"
-        if val == "卖出": return "background-color:#f8d7da"
+    def color_dir(val):
+        if val == "做多": return "background-color:#d4edda"
+        if val == "做空": return "background-color:#f8d7da"
         return ""
     st.subheader(f"筛选结果（{len(df)} 个币）")
-    st.dataframe(df.style.map(color, subset=["信号"]), use_container_width=True, hide_index=True)
+    cols = ["币种", "板块", "最新价", "涨跌%", "方向", "信号", "建议止损", "建议止盈", "RSI", "波动提示"]
+    st.dataframe(df[cols].style.map(color_dir, subset=["方向"]), use_container_width=True, hide_index=True)
 
-    st.subheader("单币种历史回测")
-    coin_list = df["币种"].tolist()
-    if coin_list:
-        bt_coin = st.selectbox("选择要回测的币种", coin_list)
-        if st.button("运行回测"):
-            sym = bt_coin + "-USD"
-            df_bt = yf.download(sym, period="2y", interval="1d", progress=False)
-            if isinstance(df_bt.columns, pd.MultiIndex):
-                df_bt.columns = df_bt.columns.droplevel(1)
-            df_bt = df_bt.dropna()
-            cash = 10000
-            position = 0
-            equity = []
-            for i in range(60, len(df_bt)):
-                sub = df_bt.iloc[:i+1]
-                res = analyze_coin(sub, sym)
-                price = float(sub["Close"].iloc[-1])
-                if res and res["信号"] == "买入" and position == 0:
-                    position = cash / price
-                    cash = 0
-                elif res and res["信号"] == "卖出" and position > 0:
-                    cash = position * price
-                    position = 0
-                equity.append(cash + position * price)
-            if equity:
-                ret = (equity[-1] / 10000 - 1) * 100
-                st.metric("近2年模拟收益", f"{ret:.1f}%")
-                st.line_chart(equity)
-                st.caption("回测为简化版，仅供参考，未计入手续费滑点。")
-
+    csv = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("下载结果 CSV", csv, "crypto_screen.csv", "text/csv")
 else:
-    st.info("请在左侧选择币种后点击「开始筛选」")
+    st.info("请在左侧选择板块和币种后点击「开始筛选」")
 
 st.markdown("---")
-st.caption("数据来源：CoinGecko + Yahoo Finance。仅供学习研究，不构成投资建议。")
+st.caption("板块数据来自 CoinGecko，价格来自 Yahoo Finance。仅供学习研究，不构成投资建议。做空需注意爆仓风险。")
